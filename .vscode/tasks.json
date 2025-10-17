@@ -1,0 +1,29 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Run main.py",
+            "type": "shell",
+            "command": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+            "args": [
+                "src/main.py"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        },
+        {
+            "label": "Run ruff linter",
+            "type": "shell",
+            "command": "${workspaceFolder}\\.venv\\Scripts\\ruff.exe",
+            "args": [
+                "check",
+                "--fix",
+                "src"
+            ],
+            "group": "test",
+            "problemMatcher": []
+        }
+    ]
+}
