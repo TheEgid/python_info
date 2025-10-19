@@ -1,0 +1,42 @@
+DROP FUNCTION IF EXISTS match_documents_novaya_v2;
+
+CREATE OR REPLACE FUNCTION match_documents_novaya_v2(
+  query_embedding vector(384),
+  match_threshold float DEFAULT 0.3,
+  match_count int DEFAULT 5
+)
+RETURNS TABLE (
+  id bigint,
+  content text,
+  metadata jsonb,
+  similarity float
+)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RETURN QUERY
+  SELECT
+    novaya.id,
+    novaya.content,
+    novaya.metadata,
+    1 - (novaya.embedding <#> query_embedding) AS similarity
+  FROM novaya
+  WHERE 1 - (novaya.embedding <#> query_embedding) > match_threshold
+  ORDER BY novaya.embedding <=> query_embedding
+  LIMIT match_count;
+END;
+$$;
+
+
+create table public.novaya (
+  id bigserial not null,
+  content text null,
+  metadata jsonb null,
+  embedding public.vector null,
+  created_at timestamp with time zone null default (now() AT TIME ZONE 'utc'::text),
+  constraint novaya_pkey primary key (id)
+) TABLESPACE pg_default;
+
+create index IF not exists novaya_embedding_idx on public.novaya using ivfflat (embedding vector_cosine_ops)
+with
+  (lists = '100') TABLESPACE pg_default;
