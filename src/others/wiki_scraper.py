@@ -1,5 +1,6 @@
 import re
 import time
+from typing import List
 
 import requests
 from bs4 import BeautifulSoup
@@ -89,3 +90,22 @@ def run_scraper(output_file: str = "llm.txt") -> None:
     with open(output_file, "r", encoding="utf-8") as file:
         for line in file.readlines()[:5]:
             print(line.strip())
+
+
+def process_text_file(file_path: str, chunk_size: int = 1000) -> List[str]:
+    """
+    Читает текст из файла, очищает его и разбивает на чанки фиксированного размера.
+
+    Args:
+        file_path (str): Путь к текстовому файлу.
+        chunk_size (int): Размер чанка в символах.
+
+    Returns:
+        List[str]: Список чанков текста.
+    """
+    with open(file_path, "r", encoding="utf-8") as f:
+        text: str = f.read()
+    text = text.replace("\n", " ")
+    chunked_text: List[str] = [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)]
+
+    return chunked_text

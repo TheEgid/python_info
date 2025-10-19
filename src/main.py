@@ -1,9 +1,9 @@
 import sys
-from typing import NoReturn
+from typing import List, NoReturn
 
 from others.frida import get_frida_embeddings
 from others.helpers import multiply
-from others.wiki_scraper import run_scraper  # noqa: F401
+from others.wiki_scraper import process_text_file, run_scraper  # noqa: F401
 
 
 def main() -> NoReturn:
@@ -11,6 +11,12 @@ def main() -> NoReturn:
         result = multiply(300, 400)
         # run_scraper()
         print(result)
+
+        file_path = "llm.txt"
+        chunks: List[str] = process_text_file(file_path)
+
+        print(f"Количество чанков: {len(chunks)}")
+        print("Пример первого чанка:", chunks[0][:100], "...")
 
         sentences = ["Пример на русском", "Another example in English"]
         emb = get_frida_embeddings(sentences)
