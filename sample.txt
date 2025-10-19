@@ -1,7 +1,7 @@
-DROP FUNCTION IF EXISTS match_documents_novaya_v2;
+DROP FUNCTION IF EXISTS match_documents_test_novaya;
 
-CREATE OR REPLACE FUNCTION match_documents_novaya_v2(
-  query_embedding vector(384),
+CREATE OR REPLACE FUNCTION match_documents_test_novaya(
+  query_embedding vector(1536),
   match_threshold float DEFAULT 0.3,
   match_count int DEFAULT 5
 )
@@ -16,27 +16,25 @@ AS $$
 BEGIN
   RETURN QUERY
   SELECT
-    novaya.id,
-    novaya.content,
-    novaya.metadata,
-    1 - (novaya.embedding <#> query_embedding) AS similarity
-  FROM novaya
-  WHERE 1 - (novaya.embedding <#> query_embedding) > match_threshold
-  ORDER BY novaya.embedding <=> query_embedding
+    test_novaya.id,
+    test_novaya.content,
+    test_novaya.metadata,
+    1 - (test_novaya.embedding <#> query_embedding) AS similarity
+  FROM test_novaya
+  WHERE 1 - (test_novaya.embedding <#> query_embedding) > match_threshold
+  ORDER BY test_novaya.embedding <=> query_embedding
   LIMIT match_count;
 END;
 $$;
 
+CREATE TABLE IF NOT EXISTS public.test_novaya (
+  id bigserial PRIMARY KEY,
+  content text,
+  metadata jsonb,
+  embedding vector(1536),
+  created_at timestamptz DEFAULT now()
+);
 
-create table public.novaya (
-  id bigserial not null,
-  content text null,
-  metadata jsonb null,
-  embedding public.vector null,
-  created_at timestamp with time zone null default (now() AT TIME ZONE 'utc'::text),
-  constraint novaya_pkey primary key (id)
-) TABLESPACE pg_default;
-
-create index IF not exists novaya_embedding_idx on public.novaya using ivfflat (embedding vector_cosine_ops)
-with
-  (lists = '100') TABLESPACE pg_default;
+CREATE INDEX IF NOT EXISTS test_novaya_embedding_idx
+ON public.test_novaya USING ivfflat (embedding vector_cosine_ops)
+WITH (lists = 100);
