@@ -1,3 +1,4 @@
+import os
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -5,23 +6,39 @@ from supabase import Client, create_client
 
 
 class VectorStoreFRIDA:
-    def __init__(self, supabase_url: str, supabase_key: str) -> None:
+    def __init__(self) -> None:
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_KEY")
         self.client: Client = create_client(supabase_url, supabase_key)
         self.table_name = "test_novaya"
 
-    def add_chunks(self, chunks: List[str], embeddings: np.ndarray, metadata: Optional[List[dict]] = None) -> None:
+    def add_chunk(
+        self,
+        chunk: str,
+        embedding: np.ndarray,
+        metadata: Optional[dict] = None
+    ) -> None:
+
         if metadata is None:
-            metadata = [{} for _ in chunks]
+            metadata = {}
 
-        rows = [
-            {"content": text, "metadata": meta, "embedding": emb.tolist()}
-            for text, meta, emb in zip(chunks, metadata, embeddings, strict=False)
-        ]
+        if embedding.ndim == 2 and embedding.shape[0] == 1:
+            embedding = embedding[0]
+        embedding_list = embedding.astype(float).tolist()
 
-        for row in rows:
-            self.client.table(self.table_name).insert(row).execute()
+        existing = self.client.table(self.table_name).select("id").eq("content", chunk).execute()
+        if existing.data and len(existing.data) > 0:
+            print(f"⚠️ Чанк уже существует в {self.table_name}, пропускаем вставку: {chunk[:50]}...")
+            return
 
-        print(f"✅ Добавлено {len(chunks)} записей в {self.table_name}")
+        row = {
+            "content": chunk,
+            "metadata": metadata,
+            "embedding": embedding_list
+        }
+
+        self.client.table(self.table_name).insert(row).execute()
+        print(f"✅ Добавлен чанк в {self.table_name}: {chunk[:50]}...")
 
     def search(
         self, query_emb: np.ndarray, top_k: int = 5, match_threshold: float = 0.3
