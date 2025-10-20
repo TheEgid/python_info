@@ -27,14 +27,14 @@ def main() -> NoReturn:
             embedding_function: Callable[[List[str]], np.ndarray] = get_frida_embeddings
 
             for i, chunk in enumerate(chunked_text):
-                embedding_data: np.ndarray = embedding_function([chunk])  # shape (1, 1536)
+                embedding_data: np.ndarray = embedding_function([chunk], device="cpu")  # shape (1, 1536)
 
                 # Метаданные с информацией о чанке
                 metadata: dict = {
                     "source": "simple_scraper",
-                    "url": source_text,           # Можно заменить на реальный URL
+                    "url": source_text,  # Можно заменить на реальный URL
                     "chunk_index": i,
-                    "total_chunks": total_chunks
+                    "total_chunks": total_chunks,
                 }
 
                 vector_store.add_chunk(chunk, embedding_data, metadata=metadata)
