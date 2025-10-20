@@ -11,10 +11,6 @@ from sentence_transformers import SentenceTransformer
 
 logger = logging.getLogger(__name__)
 
-# ============================================================================
-# СОХРАНЕНИЕ И ЗАГРУЗКА МОДЕЛИ
-# ============================================================================
-
 
 def save_model_locally(
     model_name: str = "ai-forever/FRIDA",
@@ -23,7 +19,6 @@ def save_model_locally(
     retry_delay: float = 5.0,
     verify_integrity: bool = True,
     show_progress: bool = True,
-    timeout: int = 300,
 ) -> str:
     """
     Сохраняет модель локально с надежной загрузкой, повторными попытками и отслеживанием прогресса.
@@ -35,7 +30,6 @@ def save_model_locally(
         retry_delay (float): Задержка между попытками в секундах.
         verify_integrity (bool): Проверять целостность модели после загрузки.
         show_progress (bool): Выводить подробный прогресс в лог.
-        timeout (int): Таймаут для загрузки в секундах.
 
     Returns:
         str: Путь к сохраненной модели.
@@ -75,8 +69,8 @@ def save_model_locally(
                 if show_progress:
                     logger.info("📥 Загрузка модели...")
 
-                # Загружаем модель с отслеживанием прогресса и таймаутом
-                model = _load_model_with_progress(model_name, attempt, timeout)
+                # Загружаем модель
+                model = _load_model_with_progress(model_name, attempt)
 
                 if show_progress:
                     logger.info("💾 Сохранение модели...")
@@ -150,8 +144,8 @@ def save_model_locally(
     raise Exception(f"✗ Не удалось загрузить модель '{model_name}' после {max_retries} попыток")
 
 
-def _load_model_with_progress(model_name: str, attempt: int, timeout: int = 300) -> SentenceTransformer:
-    """Загружает модель с отслеживанием этапов и таймаутом."""
+def _load_model_with_progress(model_name: str, attempt: int) -> SentenceTransformer:
+    """Загружает модель с отслеживанием этапов."""
     stages = [
         "Подключение к репозиторию...",
         "Загрузка конфигурации...",
@@ -164,11 +158,7 @@ def _load_model_with_progress(model_name: str, attempt: int, timeout: int = 300)
         logger.info(f"  [{i}/{len(stages)}] {stage}")
 
     try:
-        # Устанавливаем таймаут для загрузки
-        model = SentenceTransformer(
-            model_name,
-            device="cpu",
-        )
+        model = SentenceTransformer(model_name, device="cpu")
         logger.info("  ✓ Модель успешно загружена в памяти")
         return model
     except Exception as e:
@@ -247,11 +237,6 @@ def _get_dir_size(path: Path) -> int:
     return total
 
 
-# ============================================================================
-# РАБОТА С ЭМБЕДДИНГАМИ
-# ============================================================================
-
-
 def get_frida_embeddings(
     sentences: List[str],
     model_name: str = "ai-forever/FRIDA",
@@ -268,13 +253,12 @@ def get_frida_embeddings(
         sentences (List[str]): Список предложений (русский или английский).
         model_name (str): Название модели SentenceTransformer из Hub или путь к локальной модели.
         batch_size (int): Размер батча для encode (ускорение при больших данных).
-        local_model_dir (Optional[str]): Директория для локального кеширования модели.
-                                        Если None, модель не кешируется.
+        local_model_dir (str): Директория для локального кеширования модели.
         force_redownload (bool): Принудительно перезагрузить модель, даже если кеширована.
         device (str): Устройство для вычисления ("cpu" или "cuda").
 
     Returns:
-        np.ndarray: Массив эмбеддингов shape=(len(sentences), 1536), dtype=float32
+        np.ndarray: Массив эмбеддингов shape=(len(sentences), embedding_dim), dtype=float32
 
     Raises:
         ValueError: Если sentences пусто.
@@ -310,6 +294,9 @@ def get_frida_embeddings(
             show_progress_bar=True,
             convert_to_numpy=True,
         )
+
+        if embeddings.size == 0:
+            raise ValueError("Получены пустые эмбеддинги")
 
         logger.info(f"✓ Получены эмбеддинги: shape={embeddings.shape}, dtype={embeddings.dtype}")
 
