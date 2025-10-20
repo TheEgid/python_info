@@ -3,7 +3,7 @@ import shutil
 import tempfile
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
 import numpy as np
 import requests
@@ -256,7 +256,7 @@ def get_frida_embeddings(
     sentences: List[str],
     model_name: str = "ai-forever/FRIDA",
     batch_size: int = 32,
-    local_model_dir: Optional[str] = None,
+    local_model_dir: str = "./local_llm_models",
     force_redownload: bool = False,
     device: str = "cpu",
 ) -> np.ndarray:
