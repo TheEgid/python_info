@@ -1,3 +1,32 @@
+-- Добавить новую колонку для хешей
+ALTER TABLE public.test_novaya
+ADD COLUMN content_hash text UNIQUE DEFAULT NULL;
+
+-- Создать индекс для быстрого поиска
+CREATE INDEX IF NOT EXISTS test_novaya_content_hash_idx
+ON public.test_novaya(content_hash);
+
+-- Если нужно создать всё заново:
+DROP TABLE IF EXISTS public.test_novaya CASCADE;
+
+CREATE TABLE public.test_novaya (
+  id bigserial PRIMARY KEY,
+  content text NOT NULL,
+  content_hash text UNIQUE,
+  metadata jsonb,
+  embedding vector(1536),
+  created_at timestamptz DEFAULT now()
+);
+
+-- Индекс для поиска по эмбеддингам
+CREATE INDEX IF NOT EXISTS test_novaya_embedding_idx
+ON public.test_novaya USING ivfflat (embedding vector_cosine_ops)
+WITH (lists = 100);
+
+-- Индекс для поиска дубликатов
+CREATE INDEX IF NOT EXISTS test_novaya_content_hash_idx
+ON public.test_novaya(content_hash);
+
 DROP FUNCTION IF EXISTS match_documents_test_novaya;
 
 CREATE OR REPLACE FUNCTION match_documents_test_novaya(
@@ -26,15 +55,3 @@ BEGIN
   LIMIT match_count;
 END;
 $$;
-
-CREATE TABLE IF NOT EXISTS public.test_novaya (
-  id bigserial PRIMARY KEY,
-  content text,
-  metadata jsonb,
-  embedding vector(1536),
-  created_at timestamptz DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS test_novaya_embedding_idx
-ON public.test_novaya USING ivfflat (embedding vector_cosine_ops)
-WITH (lists = 100);
