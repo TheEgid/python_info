@@ -1,9 +1,10 @@
 import logging
 import os
-from typing import Any, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
-from llama_index.core.vector_stores import VectorStore
+from llama_index.core import SimpleDirectoryReader
+from llama_index.core.node_parser import SentenceSplitter
 from supabase import Client, create_client
 
 from others.frida import get_frida_embeddings
@@ -12,26 +13,21 @@ logger = logging.getLogger(__name__)
 
 
 class VectorStoreFRIDA:
-    def __init__(self) -> None:
+    """Векторное хранилище на Supabase с поддержкой FRIDA эмбеддингов."""
+
+    def __init__(self, table_name: str = "test_novaya") -> None:
         supabase_url = os.getenv("SUPABASE_URL")
         supabase_key = os.getenv("SUPABASE_KEY")
+
+        if not supabase_url or not supabase_key:
+            raise EnvironmentError("SUPABASE_URL и SUPABASE_KEY не заданы в .env")
+
         self.client: Client = create_client(supabase_url, supabase_key)
-        self.table_name = "test_novaya"
+        self.table_name = table_name
 
     def add_chunks_batch(
         self, chunks: List[str], embeddings: np.ndarray, metadatas: Optional[List[dict]] = None
     ) -> Tuple[int, int]:
-        """
-        Добавляет батч чанков в векторное хранилище.
-
-        Args:
-            chunks: Список текстов чанков
-            embeddings: Массив эмбеддингов shape=(n_chunks, embedding_dim)
-            metadatas: Список метаданных для каждого чанка
-
-        Returns:
-            Tuple[int, int]: количество успешно добавленных и пропущенных чанков
-        """
         if not chunks:
             logger.warning("Получен пустой батч чанков")
             return 0, 0
@@ -41,8 +37,6 @@ class VectorStoreFRIDA:
 
         if metadatas is None:
             metadatas = [{} for _ in range(len(chunks))]
-        elif len(chunks) != len(metadatas):
-            raise ValueError("Количество чанков и метаданных должно совпадать")
 
         rows_to_insert = []
         skipped_count = 0
@@ -51,22 +45,16 @@ class VectorStoreFRIDA:
             existing = self.client.table(self.table_name).select("content").in_("content", chunks).execute()
             existing_chunks = {item["content"] for item in existing.data} if existing.data else set()
         except Exception as e:
-            logger.error(f"❌ Ошибка при проверке существующих чанков: {e}")
+            logger.error(f"Ошибка при проверке существующих чанков: {e}")
             raise
 
-        # Подготавливаем данные для вставки
         for chunk, embedding, metadata in zip(chunks, embeddings, metadatas):  # noqa: B905
             if chunk in existing_chunks:
                 skipped_count += 1
                 continue
 
-            # Нормализуем эмбеддинг
             if embedding.ndim == 2 and embedding.shape[0] == 1:
                 embedding = embedding[0]
-            elif embedding.ndim > 2:
-                logger.warning(f"Неожиданная размерность эмбеддинга: {embedding.ndim}")
-                continue
-
             embedding_list = embedding.astype(float).tolist()
             rows_to_insert.append({"content": chunk, "metadata": metadata, "embedding": embedding_list})
 
@@ -75,41 +63,17 @@ class VectorStoreFRIDA:
             try:
                 self.client.table(self.table_name).insert(rows_to_insert).execute()
                 successful_count = len(rows_to_insert)
-                logger.info(f"✅ Добавлено {successful_count} чанков")
+                logger.info(f"Добавлено {successful_count} чанков")
             except Exception as e:
-                logger.error(f"❌ Ошибка при вставке батча: {e}")
+                logger.error(f"Ошибка при вставке батча: {e}")
                 raise
 
         return successful_count, skipped_count
 
-    def add_chunk(self, chunk: str, embedding: np.ndarray, metadata: Optional[dict] = None) -> None:
-        """Добавляет один чанк в хранилище."""
-        if metadata is None:
-            metadata = {}
-
-        if embedding.ndim == 2 and embedding.shape[0] == 1:
-            embedding = embedding[0]
-        embedding_list = embedding.astype(float).tolist()
-
-        try:
-            existing = self.client.table(self.table_name).select("id").eq("content", chunk).execute()
-            if existing.data and len(existing.data) > 0:
-                logger.info(f"⚠️  Чанк уже существует, пропускаем: {chunk[:50]}...")
-                return
-
-            row = {"content": chunk, "metadata": metadata, "embedding": embedding_list}
-            self.client.table(self.table_name).insert(row).execute()
-            logger.info(f"✅ Добавлен чанк: {chunk[:50]}...")
-        except Exception as e:
-            logger.error(f"❌ Ошибка при добавлении чанка: {e}")
-            raise
-
     def search(
         self, query_emb: np.ndarray, top_k: int = 5, match_threshold: float = 0.3
     ) -> List[Tuple[int, str, dict, float]]:
-        """Поиск по векторному сходству."""
         try:
-            # Нормализуем эмбеддинг запроса
             if query_emb.ndim == 2 and query_emb.shape[0] == 1:
                 query_emb = query_emb[0]
 
@@ -125,109 +89,51 @@ class VectorStoreFRIDA:
             results = response.data if response.data else []
             return [(r["id"], r["content"], r["metadata"], r["similarity"]) for r in results]
         except Exception as e:
-            logger.error(f"❌ Ошибка при поиске: {e}")
+            logger.error(f"Ошибка при поиске: {e}")
             raise
 
-
-class LlamaIndexFRIDA(VectorStore):
-    """
-    Adapter для использования VectorStoreFRIDA с LlamaIndex.
-    """
-
-    stores_text = True
-
-    def __init__(
+    # 🔥 Новый метод
+    def load_and_index_directory(
         self,
-        vector_store: Optional[VectorStoreFRIDA] = None,
-        embedding_function: Any = None,  # noqa: ANN401
-    ) -> None:
-        """
-        Args:
-            vector_store: экземпляр VectorStoreFRIDA (если None, создаётся новый)
-            embedding_function: функция для получения эмбеддингов (по умолчанию get_frida_embeddings)
-        """
-        self.vector_store = vector_store or VectorStoreFRIDA()
-        self.embedding_function = embedding_function or get_frida_embeddings
-
-    def add(self, nodes: List[Any], **add_kwargs: Any) -> List[str]:  # noqa: ANN401, ANN002, ANN003
-        """
-        Добавляет ноды (документы) в хранилище.
-        Требуется LlamaIndex интерфейсом.
-        """
-        if not nodes:
-            logger.warning("Получен пустой список нодов")
-            return []
-
-        try:
-            texts = [node.get_content() for node in nodes]
-            metadatas = [
-                node.metadata if node.metadata is not None else {} for node in nodes
-            ]
-            embeddings = self.embedding_function(texts, device="cpu")
-            added, skipped = self.vector_store.add_chunks_batch(texts, embeddings, metadatas)
-            logger.info(f"Добавлено {added} нодов, пропущено {skipped}")
-            return [node.node_id for node in nodes]
-        except Exception as e:
-            logger.error(f"❌ Ошибка при добавлении нодов: {e}")
-            raise
-
-    def add_documents(
-        self, documents: List[str], metadatas: Optional[List[dict]] = None
+        directory: str,
+        chunk_size: int = 1024,
+        chunk_overlap: int = 64,
+        batch_size: int = 64,
     ) -> Tuple[int, int]:
         """
-        Добавляет список документов в хранилище.
+        Загружает файлы из директории, разбивает на чанки и индексирует в Supabase.
 
-        Returns:
-            Tuple[int, int]: (успешно добавлено, пропущено)
+        Args:
+            directory: путь к папке с документами
+            chunk_size: длина чанка
+            chunk_overlap: перекрытие между чанками
+            batch_size: размер батча для вставки
         """
-        if not documents:
-            logger.warning("Получен пустой список документов")
+        reader = SimpleDirectoryReader(input_dir=directory)
+        docs = reader.load_data()
+        if not docs:
+            logger.warning(f"Папка '{directory}' пуста")
             return 0, 0
 
-        try:
-            embeddings = self.embedding_function(documents, device="cpu")
-            return self.vector_store.add_chunks_batch(documents, embeddings, metadatas)
-        except Exception as e:
-            logger.error(f"❌ Ошибка при добавлении документов: {e}")
-            raise
+        splitter = SentenceSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
 
-    def query(
-        self, query: str, top_k: int = 5, match_threshold: float = 0.3
-    ) -> List[Tuple[int, str, dict, float]]:
-        """
-        Поиск топ-N результатов по запросу.
+        all_chunks, all_metadatas = [], []
+        for doc in docs:
+            chunks = splitter.split_text(doc.get_content())
+            all_chunks.extend(chunks)
+            all_metadatas.extend([doc.metadata or {} for _ in chunks])
 
-        Returns:
-            Список кортежей: (id, text, metadata, similarity)
-        """
-        if not query:
-            logger.warning("Получен пустой запрос")
-            return []
+        logger.info(f"📄 Разбито {len(docs)} документов на {len(all_chunks)} чанков")
 
-        try:
-            embeddings = self.embedding_function([query], device="cpu")
+        total_added, total_skipped = 0, 0
+        for i in range(0, len(all_chunks), batch_size):
+            batch_chunks = all_chunks[i : i + batch_size]
+            batch_meta = all_metadatas[i : i + batch_size]
+            embeddings = get_frida_embeddings(batch_chunks, device="cpu")
 
-            # Гарантируем 1D array
-            if embeddings.ndim == 2:
-                if embeddings.shape[0] != 1:
-                    logger.warning(f"Неожиданная форма эмбеддинга: {embeddings.shape}")
-                query_emb = embeddings[0]
-            else:
-                query_emb = embeddings
+            added, skipped = self.add_chunks_batch(batch_chunks, embeddings, batch_meta)
+            total_added += added
+            total_skipped += skipped
 
-            results = self.vector_store.search(query_emb, top_k=top_k, match_threshold=match_threshold)
-            return results
-        except Exception as e:
-            logger.error(f"❌ Ошибка при поиске: {e}")
-            raise
-
-    def query_texts(self, query: str, top_k: int = 5, match_threshold: float = 0.3) -> List[str]:
-        """
-        Быстрый метод для получения только текстов результатов.
-        """
-        try:
-            results = self.query(query, top_k=top_k, match_threshold=match_threshold)
-            return [r[1] for r in results]
-        except Exception as e:
-            logger.error(f"❌ Ошибка при получении текстов: {e}")
-            raise
+        logger.info(f"✅ Индексация завершена: добавлено {total_added}, пропущено {total_skipped}")
+        return total_added, total_skipped

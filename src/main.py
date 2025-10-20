@@ -2,7 +2,7 @@ from typing import NoReturn
 
 from dotenv import load_dotenv
 
-from others.wiki_scraper import run_scraper_separate_files
+from classes.VectorStoreFRIDA import VectorStoreFRIDA
 
 # from classes.LLMService import LLMService
 # from classes.VectorStoreFRIDA import VectorStoreFRIDA
@@ -15,7 +15,18 @@ def main() -> NoReturn:
     """Точка входа."""
     load_dotenv()
 
-    run_scraper_separate_files()
+    # run_scraper_separate_files()
+
+    vs = VectorStoreFRIDA(table_name="test_novaya")
+
+
+    res = vs.load_and_index_directory(directory="./articles", chunk_size=1024, chunk_overlap=64, batch_size=64)
+    print(res)
+    # затем можно искать:
+    from others.frida import get_frida_embeddings
+
+    q_emb = get_frida_embeddings(["Какую самую важную информацию содержит этот набор документов?"], device="cpu")
+    print(vs.search(q_emb[0], top_k=5))
     # run_pipeline()
 
     # vector_store = VectorStoreFRIDA()
