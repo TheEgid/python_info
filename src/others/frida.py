@@ -7,10 +7,10 @@ from typing import List
 
 import numpy as np
 import requests
+from llama_index.core.embeddings import BaseEmbedding
 from sentence_transformers import SentenceTransformer
 
 logger = logging.getLogger(__name__)
-
 
 def save_model_locally(
     model_name: str = "ai-forever/FRIDA",
@@ -260,7 +260,6 @@ def get_frida_embeddings(
     logger.info(f"📊 Обработка {len(sentences)} предложений...")
 
     try:
-        # Получаем или загружаем модель
         if local_model_dir:
             model_path = _get_or_download_model(
                 model_name=model_name,
@@ -271,11 +270,8 @@ def get_frida_embeddings(
             model_path = model_name
             logger.info(f"📥 Загружаем модель '{model_name}' без кеширования...")
 
-        # Загружаем модель
         model = SentenceTransformer(model_path, device=device)
-        logger.info(f"✓ Модель загружена (устройство: {device})")
 
-        # Получаем эмбеддинги
         logger.info(f"🔄 Кодирование {len(sentences)} предложений (батч: {batch_size})...")
         embeddings = model.encode(
             sentences,
@@ -332,3 +328,17 @@ def _get_or_download_model(
         verify_integrity=True,
         show_progress=True,
     )
+
+
+class FridaEmbedding(BaseEmbedding):
+    def _get_query_embedding(self, query: str) -> List[float]:
+        return get_frida_embeddings([query])[0].tolist()
+
+    def _get_text_embedding(self, text: str) -> List[float]:
+        return get_frida_embeddings([text])[0].tolist()
+
+    async def _aget_query_embedding(self, query: str) -> List[float]:
+        return self._get_query_embedding(query)
+
+    async def _aget_text_embedding(self, text: str) -> List[float]:
+        return self._get_text_embedding(text)
