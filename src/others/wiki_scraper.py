@@ -87,7 +87,6 @@ def fetch_and_clean(url: str) -> str:
     return clean_text(text)
 
 
-
 def run_scraper_separate_files(urls: List[str] = URLS, output_dir: Path = OUTPUT_DIR) -> None:
     """Скачивает все статьи и сохраняет каждую в отдельный .txt файл с безопасным названием.
     Если файл уже существует или статья пуста, пропускаем.
@@ -116,22 +115,3 @@ def run_scraper_separate_files(urls: List[str] = URLS, output_dir: Path = OUTPUT
             print(f"\n Ошибка при загрузке {url}: {e}")
 
     print(f"\n✅ Все статьи сохранены в директории {output_dir}\n")
-
-
-# def process_text_file(file_path: str, chunk_size: int = 1000) -> List[str]:
-#     """
-#     Читает текст из файла, очищает его и разбивает на чанки фиксированного размера.
-
-#     Args:
-#         file_path (str): Путь к текстовому файлу.
-#         chunk_size (int): Размер чанка в символах.
-
-#     Returns:
-#         List[str]: Список чанков текста.
-#     """
-#     with open(file_path, "r", encoding="utf-8") as f:
-#         text: str = f.read()
-#     text = text.replace("\n", " ")
-#     chunked_text: List[str] = [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)]
-
-#     return chunked_text
