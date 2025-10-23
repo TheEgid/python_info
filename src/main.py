@@ -3,14 +3,15 @@ import os
 import sys
 import textwrap
 
-import numpy as np
 from dotenv import load_dotenv
-from llama_index.core import Settings, VectorStoreIndex
+from llama_index.core import Settings, SimpleKeywordTableIndex, VectorStoreIndex
+from llama_index.core.indices.composability import ComposableGraph
 from llama_index.core.response_synthesizers import ResponseMode
 from llama_index.llms.openrouter import OpenRouter
 
 from others.frida import FridaEmbedding
 from others.lance_dataset import load_or_fill_lance
+from others.tools import calculate_enhanced_similarity
 
 logging.basicConfig(level=logging.INFO)
 load_dotenv()
@@ -24,10 +25,6 @@ def main() -> None:
             return
 
         vector_store, nodes = load_or_fill_lance()
-
-        test_embedding = vector_store._compute_query_embedding("test")
-        logging.info(f"Embedding shape: {test_embedding.shape}")
-        logging.info(f"Embedding norm: {np.linalg.norm(test_embedding)}")  # Должно быть ~1.0
 
         if vector_store is None:
             logging.error("❌ Векторный store не создан, возможно, нет документов.")
@@ -45,16 +42,27 @@ def main() -> None:
         Settings.embed_model = embed_model
         Settings.llm = llm
 
-        index = VectorStoreIndex.from_vector_store(vector_store, embed_model=embed_model)
+        vector_index = VectorStoreIndex.from_vector_store(vector_store, embed_model=embed_model)
+        keyword_index = SimpleKeywordTableIndex.from_documents(nodes)
 
-        # Получаем ответ на вопрос
-        query_engine = index.as_query_engine(
+        graph = ComposableGraph.from_indices(
+            VectorStoreIndex,
+            children_indices=[vector_index, keyword_index],
+            index_summaries=[
+                "Векторный индекс для семантического поиска по LanceDB",
+                "Таблица ключевых слов для быстрого поиска",
+            ],
+        )
+
+        query_engine = graph.as_query_engine(
             similarity_top_k=3,
             response_mode=ResponseMode.SIMPLE_SUMMARIZE,
             streaming=False,
         )
 
-        response = query_engine.query("Какая рыба плавает быстрее всех?")
+        my_query = "Какая рыба плавает быстрее всех?"
+
+        response = query_engine.query(my_query)
         response_text = str(response).strip()
         wrapped_text = textwrap.fill(response_text, width=120)
 
@@ -64,10 +72,8 @@ def main() -> None:
         print(wrapped_text)
         print("=" * 50)
 
-        # Дополнительная информация
-        print("\n📊 Статистика ответа:")
-        print(f"   Общая длина: {len(response_text)} символов")
-        print(f"   Количество строк после форматирования: {wrapped_text.count(chr(10)) + 1}")
+        score = calculate_enhanced_similarity(my_query, response_text)
+        print(f"Best Cosine Similarity Score: {score:.3f}")
 
     except KeyboardInterrupt:
         logging.info("🛑 Программа прервана пользователем")

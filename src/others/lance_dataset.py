@@ -1,4 +1,3 @@
-
 import json
 import logging
 from pathlib import Path
@@ -47,7 +46,6 @@ def fill_lance_dataset(
         doc_id = doc.doc_id or f"doc_{i}"
         metadata = {
             "doc_id": doc_id,
-            "__node_content__": text,
             "source": getattr(doc, "extra_info", {}).get("file_path", "unknown"),
         }
 
@@ -60,9 +58,7 @@ def fill_lance_dataset(
             }
         )
 
-        nodes.append(
-            TextNode(text=text, embedding=embedding_array.tolist(), metadata=metadata, id_=doc_id)
-        )
+        nodes.append(TextNode(text=text, embedding=embedding_array.tolist(), metadata=metadata, id_=doc_id))
 
     if not table_data:
         logging.warning("⚠️ Нет валидных документов для индексации.")
@@ -72,7 +68,6 @@ def fill_lance_dataset(
 
     vector_store = PatchedLanceDBVectorStore(table=table)
     logging.info(f"✅ LanceDB создан: {len(table_data)} документов")
-    logging.info(f"📜 Lance schema: {table.schema}")
 
     return vector_store, nodes
 
@@ -85,38 +80,41 @@ def load_or_fill_lance(
         table_name = "articles"
 
         if table_name in db.table_names():
-            logging.info(f"📦 LanceDB '{table_name}' найден, загружаем...")
+            logging.info(f"📦 LanceDB '{table_name}' найден, проверяем данные...")
             table = db.open_table(table_name)
-            vector_store = PatchedLanceDBVectorStore(table=table)
+            df = table.to_pandas()  # Проверяем содержимое
+            if df.empty:
+                logging.warning(f"⚠️ Таблица '{table_name}' существует, но пуста. Пересоздаём...")
+                db.drop_table(table_name)  # Удаляем пустую и перейдём к созданию
+            else:
+                vector_store = PatchedLanceDBVectorStore(table=table)
+                nodes: List[TextNode] = []
+                for r in df.to_dict(orient="records"):
+                    meta = r.get("metadata", {})
+                    if isinstance(meta, str):
+                        try:
+                            meta = json.loads(meta)
+                        except Exception:
+                            meta = {"__node_content__": meta}
+                    text = meta.get("__node_content__", r.get("text", ""))
+                    nodes.append(
+                        TextNode(text=text, metadata=meta, embedding=r.get("embedding"), id_=meta.get("doc_id"))
+                    )
+                return vector_store, nodes
+        # Если таблица не существовала или была сброшена, создаём заново
+        logging.info("🆕 LanceDB не найден, создаём заново...")
+        articles_dir = Path("articles/")
+        if not articles_dir.exists():
+            logging.error(f"❌ Директория {articles_dir} не найдена!")
+            return None, None
 
-            # Build nodes list from existing table (useful for some LlamaIndex flows)
-            df = table.to_pandas()
-            nodes: List[TextNode] = []
-            for r in df.to_dict(orient="records"):
-                meta = r.get("metadata", {})
-                if isinstance(meta, str):
-                    try:
-                        meta = json.loads(meta)
-                    except Exception:
-                        meta = {"__node_content__": meta}
-                text = meta.get("__node_content__", r.get("text", ""))
-                nodes.append(TextNode(text=text, metadata=meta, embedding=r.get("embedding"), id_=meta.get("doc_id")))
+        documents = SimpleDirectoryReader(str(articles_dir)).load_data()
+        if not documents:
+            logging.error("❌ Не найдено документов для индексации!")
+            return None, None
 
-            return vector_store, nodes
-        else:
-            logging.info("🆕 LanceDB не найден, создаём заново...")
-            articles_dir = Path("articles/")
-            if not articles_dir.exists():
-                logging.error(f"❌ Директория {articles_dir} не найдена!")
-                return None, None
-
-            documents = SimpleDirectoryReader(str(articles_dir)).load_data()
-            if not documents:
-                logging.error("❌ Не найдено документов для индексации!")
-                return None, None
-
-            vector_store, nodes = fill_lance_dataset(documents, db_path=db_path)
-            return vector_store, nodes
+        vector_store, nodes = fill_lance_dataset(documents, db_path=db_path)
+        return vector_store, nodes
 
     except Exception as e:
         logging.exception(f"❌ Ошибка при работе с LanceDB: {e}")
