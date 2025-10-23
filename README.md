@@ -10,6 +10,7 @@ python -m venv .venv
 source .venv/bin/activate
 ```
 ```sh
+python -m pip install --upgrade pip
 pip install torch --index-url https://download.pytorch.org/whl/cpu
 pip install -r requirements.txt
 ```

@@ -3,6 +3,9 @@ beautifulsoup4==4.12.3
 requests==2.31.0
 tqdm==4.67.1
 dotenv==0.9.9
-supabase==2.22.0
+lancedb==0.25.2
+llama-index==0.14.5
+llama-index-llms-openrouter==0.4.2
+llama-index-vector-stores-lancedb==0.4.1
 sentence-transformers
 llama-index
