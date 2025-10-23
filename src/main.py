@@ -2,6 +2,7 @@
 import json
 import logging
 import os
+import textwrap
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
@@ -153,7 +154,6 @@ def fill_lance_dataset(
             "source": getattr(doc, "extra_info", {}).get("file_path", "unknown"),
         }
 
-        # Use column name 'embedding' (expected by LlamaIndex/Lance)
         table_data.append(
             {
                 "id": doc_id,
@@ -205,7 +205,6 @@ def load_or_fill_lance(
                 text = meta.get("__node_content__", r.get("text", ""))
                 nodes.append(TextNode(text=text, metadata=meta, embedding=r.get("embedding"), id_=meta.get("doc_id")))
 
-            logging.info(f"📊 Пример строки: {df.head(1).to_dict(orient='records')}")
             return vector_store, nodes
         else:
             logging.info("🆕 LanceDB не найден, создаём заново...")
@@ -240,16 +239,16 @@ def main() -> None:
             logging.error("❌ Векторный store не создан, возможно, нет документов.")
             return
 
-        # Ensure Frida is set as embed model for any further LlamaIndex calls
-        embed_model = FridaEmbedding()
-        Settings.embed_model = embed_model
-
         llm = OpenRouter(
             model="z-ai/glm-4.5-air:free",
-            max_tokens=512,
-            context_window=4096,
+            max_tokens=3000,
+            temperature=0.3,
             api_key=api_key,
+            context_window=4096,
         )
+        embed_model = FridaEmbedding()
+
+        Settings.embed_model = embed_model
         Settings.llm = llm
 
         index = VectorStoreIndex.from_vector_store(
@@ -257,19 +256,34 @@ def main() -> None:
             embed_model=embed_model,
         )
 
+        retriever = index.as_retriever(similarity_top_k=3)
+        nodes = retriever.retrieve("Ваш запрос")
+        logging.info(f"Найдено чанков: {len(nodes)}")
+
+        for i, node in enumerate(nodes):
+            logging.info(f"Чанк {i+1}: {len(node.text)} символов")
+
         query_engine = index.as_query_engine(
             similarity_top_k=3,
-            response_mode=ResponseMode.TREE_SUMMARIZE,
+            response_mode=ResponseMode.SIMPLE_SUMMARIZE,
             streaming=False,
         )
 
         logging.info("🔍 Выполнение тестового запроса...")
         response = query_engine.query("Расскажи о телескопах")
+        response_text = str(response).strip()
+        wrapped_text = textwrap.fill(response_text, width=120)  # Ширина 80 символов
+
         print("\n" + "=" * 50)
         print("ОТВЕТ:")
         print("=" * 50)
-        print(str(response))
+        print(wrapped_text)
         print("=" * 50)
+
+        # Дополнительная информация
+        print("\n📊 Статистика ответа:")
+        print(f"   Общая длина: {len(response_text)} символов")
+        print(f"   Количество строк после форматирования: {wrapped_text.count(chr(10)) + 1}")
 
     except Exception as e:
         logging.exception(f"❌ Ошибка выполнения: {e}")
