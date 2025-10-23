@@ -2,23 +2,31 @@ import logging
 import os
 import sys
 import textwrap
+import warnings
 
 from dotenv import load_dotenv
 from llama_index.core import Settings, SimpleKeywordTableIndex, VectorStoreIndex
 from llama_index.core.indices.composability import ComposableGraph
 from llama_index.core.response_synthesizers import ResponseMode
 from llama_index.llms.openrouter import OpenRouter
+from pydantic._internal._generate_schema import UnsupportedFieldAttributeWarning
 
 from others.frida import FridaEmbedding
 from others.lance_dataset import load_or_fill_lance
 from others.tools import calculate_enhanced_similarity
 
+# from others.wiki_scraper import run_scraper_separate_files
+
 logging.basicConfig(level=logging.INFO)
 load_dotenv()
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+warnings.filterwarnings("ignore", category=UnsupportedFieldAttributeWarning)
 
 
 def main() -> None:
     try:
+        # run_scraper_separate_files()
         api_key = os.getenv("OPENROUTER_API_KEY")
         if not api_key:
             logging.error("❌ OPENROUTER_API_KEY не найден в переменных окружения!")
@@ -31,12 +39,15 @@ def main() -> None:
             return
 
         llm = OpenRouter(
-            model="z-ai/glm-4.5-air:free",
+            # model="z-ai/glm-4.5-air:free",
+            model="tngtech/deepseek-r1t2-chimera:free",
             max_tokens=3000,
             temperature=0.3,
             api_key=api_key,
             context_window=4096,
+            system_prompt="Всегда отвечай на русском языке."
         )
+
         embed_model = FridaEmbedding()
 
         Settings.embed_model = embed_model
@@ -60,7 +71,8 @@ def main() -> None:
             streaming=False,
         )
 
-        my_query = "Какая рыба плавает быстрее всех?"
+        # my_query = "строение позвоночника рыб"
+        my_query = "какая рыба плавает быстро"
 
         response = query_engine.query(my_query)
         response_text = str(response).strip()

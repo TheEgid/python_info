@@ -5,6 +5,7 @@ from typing import List, Optional, Tuple
 
 import lancedb
 import numpy as np
+import pymorphy3
 from llama_index.core import Settings, SimpleDirectoryReader
 from llama_index.core.schema import Document, TextNode
 
@@ -13,6 +14,11 @@ from others.frida import FridaEmbedding
 
 LANCE_DB_PATH = Path("./lancedb/articles_index").resolve()
 
+morph = pymorphy3.MorphAnalyzer()
+
+def lemmatize_text(text: str):  # noqa: ANN201
+    # базовая лемматизация
+    return " ".join([morph.parse(word)[0].normal_form for word in text.split()])
 
 def fill_lance_dataset(
     documents: List[Document],
@@ -36,9 +42,11 @@ def fill_lance_dataset(
     nodes: List[TextNode] = []
 
     for i, doc in enumerate(documents):
-        text = (doc.text or "").strip()
-        if not text:
+        text_orig = (doc.text or "").strip()
+        if not text_orig:
             continue
+
+        text = lemmatize_text(text_orig)
 
         embedding = embed_model._get_text_embedding(text)
         embedding_array = np.array(embedding, dtype=np.float32)
@@ -52,7 +60,7 @@ def fill_lance_dataset(
         table_data.append(
             {
                 "id": doc_id,
-                "text": text,
+                "text": text,            # сохраняем уже лемматизированный текст
                 "embedding": embedding_array.tolist(),
                 "metadata": json.dumps(metadata),
             }
