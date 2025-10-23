@@ -1,14 +1,16 @@
+# src/main.py
 import json
 import logging
 import os
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import lancedb
 import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
 from llama_index.core import Settings, SimpleDirectoryReader, VectorStoreIndex
+from llama_index.core.response_synthesizers import ResponseMode
 from llama_index.core.schema import Document, TextNode
 from llama_index.core.vector_stores.types import VectorStoreQuery, VectorStoreQueryResult
 from llama_index.llms.openrouter import OpenRouter
@@ -23,55 +25,95 @@ LANCE_DB_PATH = Path("./lancedb/articles_index").resolve()
 
 
 class PatchedLanceDBVectorStore(LanceDBVectorStore):
-    """Исправляет несовместимость LlamaIndex ↔ LanceDB при возврате Series."""
+    """Patched LanceDB store: compute embeddings via Frida when needed and normalize results."""
 
-    def query(self, query: VectorStoreQuery) -> VectorStoreQueryResult:
-        """Переопределяем метод query для корректной обработки результатов."""
+    def _compute_query_embedding(self, query_obj: VectorStoreQuery) -> np.ndarray:
+        # Prefer provided embedding
+        q_emb = getattr(query_obj, "query_embedding", None)
+        if q_emb is not None:
+            return np.array(q_emb, dtype=np.float32)
+
+        # Try to extract a query text from common attributes
+        possible_text = None
+        for attr in ("query", "query_str", "query_text", "text", "query_str_value"):
+            if hasattr(query_obj, attr):
+                val = getattr(query_obj, attr)
+                if isinstance(val, str) and val.strip():
+                    possible_text = val
+                    break
+
+        # If query_obj itself is str-like, use str()
+        if possible_text is None:
+            try:
+                possible_text = str(query_obj)
+            except Exception:
+                possible_text = ""
+
+        embed_model = FridaEmbedding()
+        emb = embed_model._get_text_embedding(possible_text)
+        return np.array(emb, dtype=np.float32)
+
+    def query(self, query: VectorStoreQuery, **kwargs: Any) -> VectorStoreQueryResult:  # noqa: ANN401
         try:
-            # Выполняем поиск в LanceDB
-            query_embedding = query.query_embedding
-            if query_embedding is None:
-                raise ValueError("Query embedding is required")
+            q_emb = self._compute_query_embedding(query)
+            top_k = getattr(query, "similarity_top_k", None) or 10
 
-            # Конвертируем в numpy array если нужно
-            if not isinstance(query_embedding, np.ndarray):
-                query_embedding = np.array(query_embedding)
+            # LanceDB search expects a list/array
+            results_df = self._table.search(q_emb).limit(top_k).to_pandas()
 
-            # Выполняем поиск
-            results = self._table.search(query_embedding).limit(query.similarity_top_k or 10).to_pandas()
+            nodes: List[TextNode] = []
+            similarities: List[float] = []
+            ids: List[str] = []
 
-            # Обрабатываем результаты
-            nodes = []
-            similarities = []
-            ids = []
-
-            for idx, row in results.iterrows():
-                # Извлекаем метаданные
+            for idx, row in results_df.iterrows():
+                # Extract metadata (string or struct/pandas.Series)
                 metadata = row.get("metadata", {})
                 if isinstance(metadata, str):
                     try:
                         metadata = json.loads(metadata)
-                    except json.JSONDecodeError:
+                    except Exception:
                         metadata = {"__node_content__": metadata}
                 elif isinstance(metadata, pd.Series):
                     metadata = metadata.to_dict()
+                elif metadata is None:
+                    metadata = {}
 
-                # Убеждаемся, что есть __node_content__
-                text_content = row.get("text", "")
-                if "__node_content__" not in metadata:
+                # Ensure __node_content__ present
+                text_content = row.get("text", "") or metadata.get("__node_content__", "")
+                if "__node_content__" not in metadata or not metadata.get("__node_content__"):
                     metadata["__node_content__"] = text_content
 
-                # Создаем TextNode
-                node = TextNode(text=text_content, metadata=metadata, id_=metadata.get("doc_id", f"doc_{idx}"))
+                # Build TextNode (include embedding if present in row)
+                row_embedding = None
+                if "embedding" in row:
+                    row_embedding = row["embedding"]
+                elif "vector" in row:
+                    row_embedding = row["vector"]
+
+                node = TextNode(
+                    text=text_content,
+                    metadata=metadata,
+                    embedding=(list(row_embedding) if row_embedding is not None else None),
+                    id_=metadata.get("doc_id", f"doc_{idx}"),
+                )
 
                 nodes.append(node)
-                similarities.append(float(row.get("_distance", 0.0)))
+
+                # similarity/distance: support both _distance and _score
+                dist = row.get("_distance", None)
+                if dist is None:
+                    dist = row.get("_score", 0.0)
+                try:
+                    similarities.append(float(dist))
+                except Exception:
+                    similarities.append(0.0)
+
                 ids.append(metadata.get("doc_id", f"doc_{idx}"))
 
             return VectorStoreQueryResult(nodes=nodes, similarities=similarities, ids=ids)
 
         except Exception as e:
-            logging.error(f"Ошибка в query: {e}")
+            logging.exception(f"Ошибка в PatchedLanceDBVectorStore.query: {e}")
             return VectorStoreQueryResult(nodes=[], similarities=[], ids=[])
 
 
@@ -79,38 +121,31 @@ def fill_lance_dataset(
     documents: List[Document],
     db_path: Path = LANCE_DB_PATH,
 ) -> Tuple[Optional[PatchedLanceDBVectorStore], List[TextNode]]:
-    """Создает и заполняет LanceDB базу данных."""
     if not documents:
         logging.warning("⚠️ Нет документов для индексации.")
         return None, []
 
     logging.info(f"Создаём LanceDB по пути: {db_path}")
-
-    # Инициализация LanceDB
     db = lancedb.connect(db_path)
     table_name = "articles"
 
-    # Если таблица уже есть — удаляем (для чистого старта)
     if table_name in db.table_names():
         db.drop_table(table_name)
 
     embed_model = FridaEmbedding()
     Settings.embed_model = embed_model
 
-    # Подготавливаем данные
     table_data = []
-    nodes = []
+    nodes: List[TextNode] = []
 
     for i, doc in enumerate(documents):
-        text = doc.text.strip()
-        if not text:  # Пропускаем пустые документы
+        text = (doc.text or "").strip()
+        if not text:
             continue
 
-        # Получаем embedding
         embedding = embed_model._get_text_embedding(text)
         embedding_array = np.array(embedding, dtype=np.float32)
 
-        # Создаем метаданные
         doc_id = doc.doc_id or f"doc_{i}"
         metadata = {
             "doc_id": doc_id,
@@ -118,33 +153,29 @@ def fill_lance_dataset(
             "source": getattr(doc, "extra_info", {}).get("file_path", "unknown"),
         }
 
-        # Добавляем в данные для таблицы
+        # Use column name 'embedding' (expected by LlamaIndex/Lance)
         table_data.append(
             {
                 "id": doc_id,
                 "text": text,
-                "vector": embedding_array.tolist(),
-                "metadata": json.dumps(metadata),  # Сериализуем метаданные
+                "embedding": embedding_array.tolist(),
+                "metadata": json.dumps(metadata),
             }
         )
 
-        # Создаем TextNode
-        node = TextNode(text=text, embedding=embedding_array.tolist(), metadata=metadata, id_=doc_id)
-        nodes.append(node)
+        nodes.append(
+            TextNode(text=text, embedding=embedding_array.tolist(), metadata=metadata, id_=doc_id)
+        )
 
     if not table_data:
         logging.warning("⚠️ Нет валидных документов для индексации.")
         return None, []
 
-    # Создание таблицы
-    table = db.create_table(
-        table_name,
-        data=table_data,
-        mode="overwrite",
-    )
+    table = db.create_table(table_name, data=table_data, mode="overwrite")
 
     vector_store = PatchedLanceDBVectorStore(table=table)
     logging.info(f"✅ LanceDB создан: {len(table_data)} документов")
+    logging.info(f"📜 Lance schema: {table.schema}")
 
     return vector_store, nodes
 
@@ -152,7 +183,6 @@ def fill_lance_dataset(
 def load_or_fill_lance(
     db_path: Path = LANCE_DB_PATH,
 ) -> Tuple[Optional[PatchedLanceDBVectorStore], Optional[List[TextNode]]]:
-    """Загружает существующую базу или создает новую."""
     try:
         db = lancedb.connect(db_path)
         table_name = "articles"
@@ -162,17 +192,23 @@ def load_or_fill_lance(
             table = db.open_table(table_name)
             vector_store = PatchedLanceDBVectorStore(table=table)
 
-            # Логируем информацию о таблице
-            logging.info(f"📜 Lance schema: {table.schema}")
-            sample_data = table.to_pandas().head(1)
-            if not sample_data.empty:
-                logging.info(f"📊 Пример строки: {sample_data.to_dict(orient='records')}")
+            # Build nodes list from existing table (useful for some LlamaIndex flows)
+            df = table.to_pandas()
+            nodes: List[TextNode] = []
+            for r in df.to_dict(orient="records"):
+                meta = r.get("metadata", {})
+                if isinstance(meta, str):
+                    try:
+                        meta = json.loads(meta)
+                    except Exception:
+                        meta = {"__node_content__": meta}
+                text = meta.get("__node_content__", r.get("text", ""))
+                nodes.append(TextNode(text=text, metadata=meta, embedding=r.get("embedding"), id_=meta.get("doc_id")))
 
-            return vector_store, None
+            logging.info(f"📊 Пример строки: {df.head(1).to_dict(orient='records')}")
+            return vector_store, nodes
         else:
             logging.info("🆕 LanceDB не найден, создаём заново...")
-
-            # Проверяем наличие директории с документами
             articles_dir = Path("articles/")
             if not articles_dir.exists():
                 logging.error(f"❌ Директория {articles_dir} не найдена!")
@@ -192,9 +228,7 @@ def load_or_fill_lance(
 
 
 def main() -> None:
-    """Основная функция."""
     try:
-        # Проверяем наличие API ключа
         api_key = os.getenv("OPENROUTER_API_KEY")
         if not api_key:
             logging.error("❌ OPENROUTER_API_KEY не найден в переменных окружения!")
@@ -206,7 +240,7 @@ def main() -> None:
             logging.error("❌ Векторный store не создан, возможно, нет документов.")
             return
 
-        # Настройка модели
+        # Ensure Frida is set as embed model for any further LlamaIndex calls
         embed_model = FridaEmbedding()
         Settings.embed_model = embed_model
 
@@ -218,16 +252,15 @@ def main() -> None:
         )
         Settings.llm = llm
 
-        # Создание индекса
         index = VectorStoreIndex.from_vector_store(
             vector_store,
             embed_model=embed_model,
         )
 
-        # Создание query engine
         query_engine = index.as_query_engine(
-            response_mode="compact",
-            verbose=True,
+            similarity_top_k=3,
+            response_mode=ResponseMode.TREE_SUMMARIZE,
+            streaming=False,
         )
 
         logging.info("🔍 Выполнение тестового запроса...")
