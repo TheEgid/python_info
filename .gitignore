@@ -210,3 +210,4 @@ __marimo__/
 repomix-output.xml
 
 /deeplake_datasets
+/lancedb
