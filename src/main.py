@@ -4,48 +4,44 @@ import sys
 import textwrap
 import warnings
 
-from dotenv import load_dotenv
-from llama_index.core import Settings, SimpleKeywordTableIndex, VectorStoreIndex
-from llama_index.core.indices.composability import ComposableGraph
-from llama_index.core.response_synthesizers import ResponseMode
-from llama_index.llms.openrouter import OpenRouter
-from pydantic._internal._generate_schema import UnsupportedFieldAttributeWarning
+warnings.filterwarnings("ignore", module=r"^pydantic(\.|$)")
+warnings.filterwarnings("ignore", module=r"^pydantic_core(\.|$)")
 
-from others.frida import FridaEmbedding
-from others.lance_dataset import load_or_fill_lance
-from others.tools import calculate_enhanced_similarity
+from dotenv import load_dotenv  # noqa: E402
+from llama_index.core import Settings, SimpleKeywordTableIndex, VectorStoreIndex  # noqa: E402
+from llama_index.core.indices.composability import ComposableGraph  # noqa: E402
+from llama_index.core.response_synthesizers import ResponseMode  # noqa: E402
+from llama_index.llms.openrouter import OpenRouter  # noqa: E402
 
-# from others.wiki_scraper import run_scraper_separate_files
+from others.frida import FridaEmbedding  # noqa: E402
+from others.lance_dataset import load_or_fill_lance  # noqa: E402
+from others.tools import calculate_enhanced_similarity  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 load_dotenv()
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-warnings.filterwarnings("ignore", category=UnsupportedFieldAttributeWarning)
-
-
+# Остальной код без изменений...
 def main() -> None:
     try:
-        # run_scraper_separate_files()
         api_key = os.getenv("OPENROUTER_API_KEY")
         if not api_key:
             logging.error("❌ OPENROUTER_API_KEY не найден в переменных окружения!")
-            return
+            sys.exit(1)
 
         vector_store, nodes = load_or_fill_lance()
 
-        if vector_store is None:
-            logging.error("❌ Векторный store не создан, возможно, нет документов.")
-            return
+        if vector_store is None or not nodes:
+            logging.error("❌ Векторный store не создан или нет документов для обработки.")
+            sys.exit(1)
 
         llm = OpenRouter(
-            # model="z-ai/glm-4.5-air:free",
             model="tngtech/deepseek-r1t2-chimera:free",
             max_tokens=3000,
             temperature=0.3,
             api_key=api_key,
             context_window=4096,
-            system_prompt="Всегда отвечай на русском языке."
+            system_prompt="Ты - полезный AI-ассистент. Всегда отвечай на русском языке.",
         )
 
         embed_model = FridaEmbedding()
@@ -54,7 +50,7 @@ def main() -> None:
         Settings.llm = llm
 
         vector_index = VectorStoreIndex.from_vector_store(vector_store, embed_model=embed_model)
-        keyword_index = SimpleKeywordTableIndex.from_documents(nodes)
+        keyword_index = SimpleKeywordTableIndex(nodes=nodes)
 
         graph = ComposableGraph.from_indices(
             VectorStoreIndex,
@@ -71,27 +67,37 @@ def main() -> None:
             streaming=False,
         )
 
-        # my_query = "строение позвоночника рыб"
-        my_query = "какая рыба плавает быстро"
+        queries = ["какая рыба плавает быстро"]
 
-        response = query_engine.query(my_query)
-        response_text = str(response).strip()
-        wrapped_text = textwrap.fill(response_text, width=120)
+        for i, my_query in enumerate(queries, 1):
+            print(f"\n{'=' * 60}")
+            print(f"ЗАПРОС {i}: {my_query}")
+            print(f"{'=' * 60}")
 
-        print("\n" + "=" * 50)
-        print("ОТВЕТ:")
-        print("=" * 50)
-        print(wrapped_text)
-        print("=" * 50)
+            try:
+                response = query_engine.query(my_query)
+                response_text = str(response).strip()
 
-        score = calculate_enhanced_similarity(my_query, response_text)
-        print(f"Best Cosine Similarity Score: {score:.3f}")
+                if response_text:
+                    wrapped_text = textwrap.fill(response_text, width=80)
+                    print("ОТВЕТ:")
+                    print(wrapped_text)
+
+                    score = calculate_enhanced_similarity(my_query, response_text)
+                    print(f"\nScore схожести: {score:.3f}")
+                else:
+                    print("❌ Пустой ответ от модели")
+
+            except Exception as e:
+                logging.error(f"Ошибка при обработке запроса: {e}")
+                continue
 
     except KeyboardInterrupt:
         logging.info("🛑 Программа прервана пользователем")
         sys.exit(0)
     except Exception as e:
-        logging.exception(f"❌ Ошибка выполнения: {e}")
+        logging.exception(f"❌ Критическая ошибка выполнения: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
