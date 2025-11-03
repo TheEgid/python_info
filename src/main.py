@@ -176,14 +176,21 @@ def main() -> None:
     LANCE_DB_PATH = Path("./lance_db/lance_db")
 
     try:
-        run_rag_system(lance_db_path=LANCE_DB_PATH)
+        # 1. Заполнение LanceDB
+        vector_store, nodes = sync_supabase_to_lance(lance_db_path=LANCE_DB_PATH)
+        if nodes:
+            print(f"\n✅ Синхронизировано {len(nodes)} документов")
+        else:
+            print("\n❌ Синхронизация не выполнена")
+
+        # run_rag_system(lance_db_path=LANCE_DB_PATH)
         # # vector_store, nodes = sync_supabase_to_lance(lance_db_path=LANCE_DB_PATH)
         # if nodes:
         #     print(f"\n✅ Синхронизировано {len(nodes)} документов")
         # else:
         #     print("\n❌ Синхронизация не выполнена")
 
-        # display_lance_db_contents(limit=3)
+        display_lance_db_contents(limit=3,db_path=LANCE_DB_PATH, show_vectors=True)
 
     except KeyboardInterrupt:
         logging.info("🛑 Программа прервана пользователем")

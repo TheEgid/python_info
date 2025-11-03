@@ -210,6 +210,6 @@ __marimo__/
 repomix-output.xml
 
 /deeplake_datasets
-/lancedb
+/lance_db
 /articles
 cache_supabase.json

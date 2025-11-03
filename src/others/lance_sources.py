@@ -6,7 +6,6 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from llama_index.core import SimpleDirectoryReader
 from llama_index.core.schema import Document, TextNode
 from supabase import Client, create_client
 
@@ -57,24 +56,6 @@ def get_supabase_client() -> Client:
     return _supabase_manager.supabase
 
 
-# ==================== ДОКУМЕНТЫ ИЗ ДИРЕКТОРИИ ====================
-def get_documents_from_directory(directory: str = "articles/") -> List[Document]:
-    """Загружает документы из директории"""
-    articles_dir = Path(directory)
-
-    if not articles_dir.exists():
-        logging.error(f"❌ Директория {articles_dir} не найдена!")
-        return []
-
-    try:
-        documents = SimpleDirectoryReader(str(articles_dir)).load_data()
-        logging.info(f"📁 Загружено {len(documents)} документов из {directory}")
-        return documents
-    except Exception as e:
-        logging.error(f"❌ Ошибка загрузки документов из {directory}: {e}")
-        return []
-
-
 # ==================== РАБОТА С SUPABASE ====================
 def calculate_content_hash(content: str) -> str:
     """Вычисляет MD5 хеш содержимого для проверки дубликатов"""
@@ -110,14 +91,116 @@ def split_text_into_chunks(text: str, chunk_size: int, overlap: int) -> List[str
     return chunks
 
 
+def check_if_document_exists(
+    table_name: str,
+    url: str,
+    content_hash: str = None,
+) -> bool:
+    """
+    Проверяет, существует ли документ в базе по URL или content_hash.
+
+    Args:
+        table_name: Название таблицы
+        url: URL документа
+        content_hash: Хеш содержимого
+
+    Returns:
+        True если документ существует, False иначе
+    """
+    try:
+        supabase = get_supabase_client()
+
+        # Проверяем по URL в метаданных
+        response = supabase.table(table_name).select("id").eq("metadata->>'url'", url).limit(1).execute()
+
+        if response.data and len(response.data) > 0:
+            logging.info(f"ℹ️ Документ с URL '{url}' уже существует в базе")
+            return True
+
+        # Если передан хеш, проверяем по нему
+        if content_hash:
+            response = supabase.table(table_name).select("id").eq("content_hash", content_hash).limit(1).execute()
+
+            if response.data and len(response.data) > 0:
+                logging.info(f"ℹ️ Документ с хешем '{content_hash}' уже существует в базе")
+                return True
+
+        return False
+
+    except Exception as e:
+        logging.warning(f"⚠️ Ошибка при проверке существования документа: {e}")
+        return False
+
+
+def check_bulk_documents_exist(
+    table_name: str,
+    documents: List[Document],
+) -> Tuple[List[Document], int]:
+    """
+    Проверяет, какие документы уже существуют в базе.
+
+    Args:
+        table_name: Название таблицы
+        documents: Список документов для проверки
+
+    Returns:
+        Tuple[новые_документы, количество_существующих]
+    """
+    try:
+        supabase = get_supabase_client()
+
+        new_documents = []
+        existing_count = 0
+
+        # Получаем все существующие URL из базы
+        response = supabase.table(table_name).select("metadata").execute()
+
+        existing_urls = set()
+        existing_hashes = set()
+
+        for row in response.data:
+            metadata = row.get("metadata", {})
+            if isinstance(metadata, str):
+                try:
+                    metadata = json.loads(metadata)
+                except Exception:
+                    pass
+
+            if isinstance(metadata, dict):
+                url = metadata.get("url")
+                if url:
+                    existing_urls.add(url)
+
+        # Проверяем каждый документ
+        for doc in documents:
+            url = doc.metadata.get("url", "")
+            content_hash = calculate_content_hash(doc.text or "")
+
+            if url in existing_urls or content_hash in existing_hashes:
+                logging.info(f"⏭️ Пропускаем документ '{url}' - уже в базе")
+                existing_count += 1
+            else:
+                new_documents.append(doc)
+                existing_hashes.add(content_hash)
+
+        logging.info(f"📊 Найдено {len(new_documents)} новых документов из {len(documents)}")
+        logging.info(f"📊 Пропущено {existing_count} существующих документов")
+
+        return new_documents, existing_count
+
+    except Exception as e:
+        logging.warning(f"⚠️ Ошибка при массовой проверке: {e}")
+        return documents, 0
+
+
 def get_documents_from_supabase(
     table_name: str = "novaya",
     limit: Optional[int] = None,
     where_condition: Optional[Dict[str, Any]] = None,
     include_metadata: bool = True,
     cache_path: Path = Path("./cache_supabase.json"),
-    cache_ttl: int = 3600,  # Время жизни кеша в секундах (по умолчанию 1 час)
-    force_refresh: bool = False,  # Принудительно обновить кеш
+    cache_ttl: int = 3600,
+    force_refresh: bool = False,
 ) -> List[Document]:
     """
     Получает документы из Supabase с восстановлением чанков и кешированием результата.
@@ -290,16 +373,19 @@ def insert_documents_to_supabase(
     documents: List[Document],
     table_name: str = "novaya",
     chunk_size: int = 1000,
-    overlap: int = 200
+    overlap: int = 200,
+    skip_existing: bool = True,
 ) -> Dict[str, Any]:
     """
     Вставляет документы в Supabase с автоматическим разбиением на чанки.
+    Проверяет наличие документов перед вставкой.
 
     Args:
         documents: Список документов для вставки
         table_name: Название таблицы
         chunk_size: Максимальный размер чанка в символах
         overlap: Перекрытие между чанками
+        skip_existing: Пропускать ли существующие документы
 
     Returns:
         Статистика операции
@@ -307,13 +393,31 @@ def insert_documents_to_supabase(
     try:
         supabase = get_supabase_client()
 
+        logging.info(f"🔍 Проверка {len(documents)} документов перед вставкой...")
+
+        # Проверяем, какие документы уже существуют
+        if skip_existing:
+            new_documents, skipped_documents = check_bulk_documents_exist(table_name, documents)
+        else:
+            new_documents = documents
+            skipped_documents = 0
+
+        if not new_documents:
+            logging.info("⏭️ Все документы уже существуют в базе, вставка отменена")
+            return {
+                "inserted_documents": 0,
+                "skipped_documents": skipped_documents,
+                "total_chunks_created": 0,
+                "errors": ["Все документы уже существуют в базе"],
+            }
+
         inserted_count = 0
-        skipped_count = 0
         total_chunks_created = 0
+        duplicate_chunks = 0
         errors = []
         records_to_insert = []
 
-        for doc in documents:
+        for doc in new_documents:
             try:
                 content = doc.text or ""
                 url = doc.metadata.get("url", "unknown")
@@ -324,6 +428,20 @@ def insert_documents_to_supabase(
 
                 for chunk_index, chunk_content in enumerate(chunks):
                     content_hash = calculate_content_hash(chunk_content)
+
+                    # Проверяем, существует ли этот чанк
+                    try:
+                        check_response = supabase.table(table_name).select("id").eq(
+                            "content_hash", content_hash
+                        ).limit(1).execute()
+
+                        if check_response.data and len(check_response.data) > 0:
+                            logging.debug(f"⏭️ Чанк {chunk_index} документа '{url}' уже существует")
+                            duplicate_chunks += 1
+                            continue
+
+                    except Exception as e:
+                        logging.warning(f"⚠️ Ошибка проверки дубликата чанка: {e}")
 
                     # Подготавливаем метаданные для чанка
                     chunk_metadata = doc.metadata.copy()
@@ -348,23 +466,36 @@ def insert_documents_to_supabase(
 
             except Exception as e:
                 errors.append(f"Документ {doc.doc_id}: {str(e)}")
+                logging.error(f"❌ Ошибка обработки документа: {str(e)}")
                 continue
 
         # Вставляем все записи одной операцией
         if records_to_insert:
             try:
-                response = supabase.table(table_name).upsert(records_to_insert).execute()  # noqa: F841
-                logging.info(f"✅ Успешно вставлено {len(records_to_insert)} записей")
+                batch_size = 100  # Вставляем по 100 записей за раз
+                for i in range(0, len(records_to_insert), batch_size):
+                    batch = records_to_insert[i:i + batch_size]
+                    supabase.table(table_name).upsert(batch).execute()  # noqa: F841
+                    logging.info(f"✅ Вставлено {len(batch)} записей (батч {i // batch_size + 1})")
+
+                logging.info(f"✅ Успешно вставлено {total_chunks_created} чанков")
+
             except Exception as e:
                 logging.error(f"❌ Ошибка вставки данных: {e}")
                 errors.append(f"Ошибка массовой вставки: {str(e)}")
+        else:
+            logging.warning("⚠️ Нет новых чанков для вставки (все являются дубликатами)")
 
-        return {
+        result = {
             "inserted_documents": inserted_count,
-            "skipped_chunks": skipped_count,
+            "skipped_documents": skipped_documents,
             "total_chunks_created": total_chunks_created,
+            "duplicate_chunks": duplicate_chunks,
             "errors": errors,
         }
+
+        logging.info(f"📊 Статистика вставки: {result}")
+        return result
 
     except Exception as e:
         logging.error(f"❌ Ошибка вставки в Supabase: {e}")
@@ -532,38 +663,3 @@ def get_table_stats(table_name: str = "novaya") -> Dict[str, Any]:
     except Exception as e:
         logging.error(f"❌ Ошибка получения статистики: {e}")
         return {"error": str(e)}
-
-
-# # ==================== ПРИМЕРЫ ИСПОЛЬЗОВАНИЯ ====================
-# if __name__ == "__main__":
-#     logging.basicConfig(level=logging.INFO)
-
-#     # 1. Тест подключения
-#     print("\n=== Тест 1: Проверка подключения ===")
-#     try:
-#         client = get_supabase_client()
-#         print("✅ Подключение к Supabase успешно!")
-#     except Exception as e:
-#         print(f"❌ Ошибка подключения: {e}")
-
-#     # 2. Получить статистику таблицы
-#     print("\n=== Тест 2: Статистика таблицы ===")
-#     stats = get_table_stats("novaya")
-#     print(f"📊 Статистика: {stats}")
-
-#     # 3. Синхронизация всех данных
-#     print("\n=== Тест 3: Синхронизация ===")
-#     vector_store, nodes = sync_supabase_to_lance()
-#     if nodes:
-#         print(f"✅ Загружено {len(nodes)} документов")
-
-#     # 4. Вставка тестовых данных
-#     print("\n=== Тест 4: Вставка тестовых данных ===")
-#     sample_docs = [
-#         Document(
-#             text="Это первый тестовый документ для проверки работы системы.",
-#             metadata={"url": "https://example.com/doc1", "source": "test_supabase_sdk"},
-#         ),
-#     ]
-#     result = insert_documents_to_supabase(sample_docs)
-#     print(f"📊 Результат: {result}")
