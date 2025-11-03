@@ -3,6 +3,7 @@ import os
 import sys
 import textwrap
 import warnings
+from typing import Tuple
 
 warnings.filterwarnings("ignore", module=r"^pydantic(\.|$)")
 warnings.filterwarnings("ignore", module=r"^pydantic_core(\.|$)")
@@ -14,28 +15,96 @@ from llama_index.core.response_synthesizers import ResponseMode  # noqa: E402
 from llama_index.llms.openrouter import OpenRouter  # noqa: E402
 
 from others.frida import FridaEmbedding  # noqa: E402
-from others.lance_dataset import load_or_fill_lance  # noqa: E402
+from others.lance_dataset import display_lance_db_contents, load_or_fill_lance  # noqa: E402, F401
 from others.tools import calculate_enhanced_similarity  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 load_dotenv()
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-# Остальной код без изменений...
-def main() -> None:
+
+def load_data_and_validate() -> Tuple[object, list]:
+    vector_store, nodes = load_or_fill_lance()
+    if vector_store is None or not nodes:
+        logging.error("❌ Векторный store не создан или нет документов для обработки.")
+        sys.exit(1)
+    return vector_store, nodes
+
+
+def create_vector_index(vector_store: object, embed_model: FridaEmbedding) -> VectorStoreIndex:
+    return VectorStoreIndex.from_vector_store(vector_store, embed_model=embed_model)
+
+
+def create_keyword_index(nodes: list) -> SimpleKeywordTableIndex:
+    return SimpleKeywordTableIndex(nodes=nodes)
+
+
+def create_composable_graph(vector_index: VectorStoreIndex, keyword_index: SimpleKeywordTableIndex) -> ComposableGraph:
+    return ComposableGraph.from_indices(
+        VectorStoreIndex,
+        children_indices=[vector_index, keyword_index],
+        index_summaries=[
+            "Векторный индекс для семантического поиска по LanceDB",
+            "Таблица ключевых слов для быстрого поиска",
+        ],
+    )
+
+
+def create_query_engine(graph: ComposableGraph) -> object:
+    return graph.as_query_engine(
+        similarity_top_k=3,
+        response_mode=ResponseMode.SIMPLE_SUMMARIZE,
+        streaming=False,
+    )
+
+
+def process_single_query(query_engine: object, query: str, query_index: int) -> None:
+    """
+    Обрабатывает один запрос и выводит результат.
+
+    Args:
+        query_engine (object): Query engine
+        query (str): Текст запроса
+        query_index (int): Номер запроса для вывода
+    """
+    print(f"\n{'=' * 60}")
+    print(f"ЗАПРОС {query_index}: {query}")
+    print(f"{'=' * 60}")
+
     try:
-        api_key = os.getenv("OPENROUTER_API_KEY")
-        if not api_key:
-            logging.error("❌ OPENROUTER_API_KEY не найден в переменных окружения!")
-            sys.exit(1)
+        response = query_engine.query(query)
+        response_text = str(response).strip()
 
-        vector_store, nodes = load_or_fill_lance()
+        if response_text:
+            wrapped_text = textwrap.fill(response_text, width=80)
+            print("ОТВЕТ:")
+            print(wrapped_text)
 
-        if vector_store is None or not nodes:
-            logging.error("❌ Векторный store не создан или нет документов для обработки.")
-            sys.exit(1)
+            score = calculate_enhanced_similarity(query, response_text)
+            print(f"\nScore схожести: {score:.3f}")
+        else:
+            print("❌ Пустой ответ от модели")
 
-        llm = OpenRouter(
+    except Exception as e:
+        logging.error(f"Ошибка при обработке запроса: {e}")
+
+
+def execute_queries(query_engine: object, queries: list[str]) -> None:
+    """
+    Выполняет список запросов через query engine.
+
+    Args:
+        query_engine (object): Query engine для выполнения запросов
+        queries (list[str]): Список запросов
+    """
+    for i, query in enumerate(queries, 1):
+        process_single_query(query_engine, query, i)
+
+
+
+def setup_models_and_settings(api_key: str) -> Tuple[OpenRouter, FridaEmbedding]:
+    def configure_llm_model(api_key: str) -> OpenRouter:
+        return OpenRouter(
             model="tngtech/deepseek-r1t2-chimera:free",
             max_tokens=3000,
             temperature=0.3,
@@ -44,54 +113,75 @@ def main() -> None:
             system_prompt="Ты - полезный AI-ассистент. Всегда отвечай на русском языке.",
         )
 
-        embed_model = FridaEmbedding()
+    llm = configure_llm_model(api_key)
+    embed_model = FridaEmbedding()
 
-        Settings.embed_model = embed_model
-        Settings.llm = llm
+    Settings.embed_model = embed_model
+    Settings.llm = llm
 
-        vector_index = VectorStoreIndex.from_vector_store(vector_store, embed_model=embed_model)
-        keyword_index = SimpleKeywordTableIndex(nodes=nodes)
+    return llm, embed_model
 
-        graph = ComposableGraph.from_indices(
-            VectorStoreIndex,
-            children_indices=[vector_index, keyword_index],
-            index_summaries=[
-                "Векторный индекс для семантического поиска по LanceDB",
-                "Таблица ключевых слов для быстрого поиска",
-            ],
-        )
 
-        query_engine = graph.as_query_engine(
-            similarity_top_k=3,
-            response_mode=ResponseMode.SIMPLE_SUMMARIZE,
-            streaming=False,
-        )
+def create_indices_and_graph(vector_store: object, nodes: list, embed_model: FridaEmbedding) -> ComposableGraph:
+    """
+    Создает все индексы и композиционный граф.
 
-        queries = ["какая рыба плавает быстро"]
+    Args:
+        vector_store (object): Векторное хранилище
+        nodes (list): Список узлов документов
+        embed_model (FridaEmbedding): Embedding модель
 
-        for i, my_query in enumerate(queries, 1):
-            print(f"\n{'=' * 60}")
-            print(f"ЗАПРОС {i}: {my_query}")
-            print(f"{'=' * 60}")
+    Returns:
+        ComposableGraph: Готовый композиционный граф
+    """
+    vector_index = create_vector_index(vector_store, embed_model)
+    keyword_index = create_keyword_index(nodes)
+    return create_composable_graph(vector_index, keyword_index)
 
-            try:
-                response = query_engine.query(my_query)
-                response_text = str(response).strip()
 
-                if response_text:
-                    wrapped_text = textwrap.fill(response_text, width=80)
-                    print("ОТВЕТ:")
-                    print(wrapped_text)
+def run_rag_system() -> None:
+    """
+    Запускает полную систему RAG (Retrieval-Augmented Generation).
 
-                    score = calculate_enhanced_similarity(my_query, response_text)
-                    print(f"\nScore схожести: {score:.3f}")
-                else:
-                    print("❌ Пустой ответ от модели")
+    Координирует работу всех компонентов системы:
+    - Валидация окружения
+    - Загрузка данных
+    - Настройка моделей
+    - Создание индексов
+    - Выполнение запросов
+    """
+    vector_store, nodes = load_data_and_validate()
 
-            except Exception as e:
-                logging.error(f"Ошибка при обработке запроса: {e}")
-                continue
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        logging.error("❌ OPENROUTER_API_KEY не найден в переменных окружения!")
+        sys.exit(1)
 
+    # Настройка моделей
+    _llm, embed_model = setup_models_and_settings(api_key)
+
+    # Создание индексов и графа
+    graph = create_indices_and_graph(vector_store, nodes, embed_model)
+
+    # Создание query engine
+    query_engine = create_query_engine(graph)
+
+    # Выполнение запросов
+
+    queries = ["какая рыба плавает быстро"]
+
+    execute_queries(query_engine, queries)
+
+
+def main() -> None:
+    """
+    Основная функция программы с обработкой исключений.
+
+    Обеспечивает graceful shutdown и логирование ошибок.
+    """
+    try:
+        run_rag_system()
+        # display_lance_db_contents(limit=1)
     except KeyboardInterrupt:
         logging.info("🛑 Программа прервана пользователем")
         sys.exit(0)
