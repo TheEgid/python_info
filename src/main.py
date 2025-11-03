@@ -180,8 +180,8 @@ def main() -> None:
     Обеспечивает graceful shutdown и логирование ошибок.
     """
     try:
-        run_rag_system()
-        # display_lance_db_contents(limit=1)
+        # run_rag_system()
+        display_lance_db_contents(limit=1)
     except KeyboardInterrupt:
         logging.info("🛑 Программа прервана пользователем")
         sys.exit(0)
