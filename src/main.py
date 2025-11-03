@@ -3,6 +3,7 @@ import os
 import sys
 import textwrap
 import warnings
+from pathlib import Path
 from typing import Tuple
 
 warnings.filterwarnings("ignore", module=r"^pydantic(\.|$)")
@@ -16,19 +17,12 @@ from llama_index.llms.openrouter import OpenRouter  # noqa: E402
 
 from others.frida import FridaEmbedding  # noqa: E402
 from others.lance_dataset import display_lance_db_contents, load_or_fill_lance  # noqa: E402, F401
+from others.lance_sources import sync_supabase_to_lance  # noqa: E402, F401
 from others.tools import calculate_enhanced_similarity  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 load_dotenv()
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
-
-def load_data_and_validate() -> Tuple[object, list]:
-    vector_store, nodes = load_or_fill_lance()
-    if vector_store is None or not nodes:
-        logging.error("❌ Векторный store не создан или нет документов для обработки.")
-        sys.exit(1)
-    return vector_store, nodes
 
 
 def create_vector_index(vector_store: object, embed_model: FridaEmbedding) -> VectorStoreIndex:
@@ -101,7 +95,6 @@ def execute_queries(query_engine: object, queries: list[str]) -> None:
         process_single_query(query_engine, query, i)
 
 
-
 def setup_models_and_settings(api_key: str) -> Tuple[OpenRouter, FridaEmbedding]:
     def configure_llm_model(api_key: str) -> OpenRouter:
         return OpenRouter(
@@ -139,7 +132,7 @@ def create_indices_and_graph(vector_store: object, nodes: list, embed_model: Fri
     return create_composable_graph(vector_index, keyword_index)
 
 
-def run_rag_system() -> None:
+def run_rag_system(lance_db_path: Path) -> None:
     """
     Запускает полную систему RAG (Retrieval-Augmented Generation).
 
@@ -150,7 +143,8 @@ def run_rag_system() -> None:
     - Создание индексов
     - Выполнение запросов
     """
-    vector_store, nodes = load_data_and_validate()
+
+    vector_store, nodes = load_or_fill_lance(db_path=lance_db_path, documents_source="articles")
 
     api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
@@ -168,7 +162,7 @@ def run_rag_system() -> None:
 
     # Выполнение запросов
 
-    queries = ["какая рыба плавает быстро"]
+    queries = ["отличия эмблемы от логотипа"]
 
     execute_queries(query_engine, queries)
 
@@ -179,9 +173,18 @@ def main() -> None:
 
     Обеспечивает graceful shutdown и логирование ошибок.
     """
+    LANCE_DB_PATH = Path("./lance_db/lance_db")
+
     try:
-        # run_rag_system()
-        display_lance_db_contents(limit=1)
+        run_rag_system(lance_db_path=LANCE_DB_PATH)
+        # # vector_store, nodes = sync_supabase_to_lance(lance_db_path=LANCE_DB_PATH)
+        # if nodes:
+        #     print(f"\n✅ Синхронизировано {len(nodes)} документов")
+        # else:
+        #     print("\n❌ Синхронизация не выполнена")
+
+        # display_lance_db_contents(limit=3)
+
     except KeyboardInterrupt:
         logging.info("🛑 Программа прервана пользователем")
         sys.exit(0)

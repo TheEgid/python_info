@@ -11,9 +11,7 @@ from llama_index.core.schema import Document, TextNode
 
 from classes.PatchedLanceDBVectorStore import PatchedLanceDBVectorStore
 from others.frida import FridaEmbedding
-from src.others.lance_sources import get_documents_from_directory, get_documents_from_sql
-
-LANCE_DB_PATH = Path("./lancedb/articles_index").resolve()
+from others.lance_sources import get_documents_from_directory
 
 morph = pymorphy3.MorphAnalyzer()
 
@@ -24,7 +22,7 @@ def lemmatize_text(text: str) -> str:
 
 
 def fill_lance_dataset(
-    documents: List[Document], db_path: Path = LANCE_DB_PATH, table_name: str = "articles"
+    documents: List[Document], db_path: Path, table_name: str = "articles"
 ) -> Tuple[Optional[PatchedLanceDBVectorStore], List[TextNode]]:
     """Создает или обновляет LanceDB dataset из документов"""
     if not documents:
@@ -32,7 +30,7 @@ def fill_lance_dataset(
         return None, []
 
     logging.info(f"Создаём LanceDB по пути: {db_path}")
-    db = lancedb.connect(db_path)
+    db = lancedb.connect(str(db_path))
 
     if table_name in db.table_names():
         logging.info(f"🔄 Обновляем существующую таблицу: {table_name}")
@@ -64,13 +62,20 @@ def fill_lance_dataset(
         table_data.append(
             {
                 "id": doc_id,
-                "text": text,  # сохраняем лемматизированный текст
+                "text": text,
                 "embedding": embedding_array.tolist(),
                 "metadata": json.dumps(metadata),
             }
         )
 
-        nodes.append(TextNode(text=text, embedding=embedding_array.tolist(), metadata=metadata, id_=doc_id))
+        nodes.append(
+            TextNode(
+                text=text,
+                embedding=embedding_array.tolist(),
+                metadata=metadata,
+                id_=doc_id,
+            )
+        )
 
     if not table_data:
         logging.warning("⚠️ Нет валидных документов для индексации.")
@@ -84,8 +89,8 @@ def fill_lance_dataset(
 
 
 def load_or_fill_lance(
-    db_path: Path = LANCE_DB_PATH,
-    documents_source: Optional[str] = "directory",
+    db_path: Path,
+    documents_source: Optional[str] = "supabase",
     table_name: str = "articles",
 ) -> Tuple[Optional[PatchedLanceDBVectorStore], Optional[List[TextNode]]]:
     """
@@ -93,15 +98,14 @@ def load_or_fill_lance(
 
     Args:
         db_path: Путь к базе данных LanceDB
-        documents_source: Источник документов ("directory", "sql")
-        custom_documents_loader: Кастомная функция для загрузки документов
+        documents_source: Источник документов ("directory", "supabase")
         table_name: Название таблицы в базе данных
 
     Returns:
         Tuple[vector_store, nodes] или (None, None) при ошибке
     """
     try:
-        db = lancedb.connect(db_path)
+        db = lancedb.connect(str(db_path))
 
         if table_name in db.table_names():
             logging.info(f"📦 LanceDB '{table_name}' найден, проверяем данные...")
@@ -124,7 +128,12 @@ def load_or_fill_lance(
 
                     text = meta.get("content", record.get("text", ""))
                     nodes.append(
-                        TextNode(text=text, metadata=meta, embedding=record.get("embedding"), id_=meta.get("doc_id"))
+                        TextNode(
+                            text=text,
+                            metadata=meta,
+                            embedding=record.get("embedding"),
+                            id_=meta.get("doc_id"),
+                        )
                     )
                 return vector_store, nodes
 
@@ -133,9 +142,19 @@ def load_or_fill_lance(
         # Определяем источник документов
         documents = []
 
-        if documents_source == "sql":
-            logging.info("🗃️ Загружаем документы из SQL базы...")
-            documents = get_documents_from_sql()
+        if documents_source == "supabase":
+            logging.info("🗃️ Загружаем последние 25 документов из Supabase...")
+            from others.lance_sources import get_documents_from_supabase
+
+            documents = get_documents_from_supabase(
+                table_name=table_name,
+                limit=25,
+            )
+            documents = sorted(
+                documents,
+                key=lambda d: d.metadata.get("created_at", 0),
+                reverse=True,
+            )[:25]
         else:  # directory - значение по умолчанию
             logging.info("📁 Загружаем документы из директории...")
             documents = get_documents_from_directory()
@@ -153,11 +172,9 @@ def load_or_fill_lance(
 
 
 def display_lance_db_contents(limit: int = 10, show_vectors: bool = False) -> None:
-    """
-    Показывает содержимое LanceDB в читаемом формате.
-    """
+    """Показывает содержимое LanceDB в читаемом формате."""
     try:
-        vector_store, nodes = load_or_fill_lance()
+        vector_store, nodes = load_or_fill_lance(db_path=Path("./data/lance_db"))
 
         if vector_store is None:
             print("❌ Vector store не доступен")
@@ -171,7 +188,6 @@ def display_lance_db_contents(limit: int = 10, show_vectors: bool = False) -> No
         print("СОДЕРЖИМОЕ LANCE DB")
         print(f"{'=' * 80}")
 
-        # Получаем сырые данные из таблицы для дополнительной информации
         try:
             table = vector_store.table
             df = table.to_pandas()
@@ -184,7 +200,6 @@ def display_lance_db_contents(limit: int = 10, show_vectors: bool = False) -> No
         print("\n📊 Информация об узлах:")
         print(f"   • Количество узлов: {len(nodes)}")
 
-        # Показываем первые N узлов
         print(f"\n📄 Первые {limit} документов:")
         print(f"{'-' * 80}")
 
@@ -193,11 +208,9 @@ def display_lance_db_contents(limit: int = 10, show_vectors: bool = False) -> No
             print(f"   ID: {node.node_id}")
             print(f"   Метаданные: {node.metadata}")
 
-            # Отображаем текст (уже лемматизированный в вашей реализации)
             text_preview = node.text[:300] + "..." if len(node.text) > 300 else node.text
-            print(f"   Текст (лемматизированный): {text_preview}")
+            print(f"   Текст: {text_preview}")
 
-            # Информация о векторе
             if hasattr(node, "embedding") and node.embedding is not None:
                 vector_length = len(node.embedding) if node.embedding else 0
                 print(f"   Размер вектора: {vector_length}")
@@ -213,7 +226,6 @@ def display_lance_db_contents(limit: int = 10, show_vectors: bool = False) -> No
         if len(nodes) > limit:
             print(f"\n⚠️  Показано {limit} из {len(nodes)} документов")
 
-        # Статистика по метаданным
         if nodes:
             metadata_keys = set()
             sources = set()
@@ -228,7 +240,6 @@ def display_lance_db_contents(limit: int = 10, show_vectors: bool = False) -> No
             if sources:
                 print(f"📁 Источники документов: {list(sources)}")
 
-        # Дополнительная статистика
         total_chars = sum(len(node.text) for node in nodes) if nodes else 0
         avg_chars = total_chars / len(nodes) if nodes else 0
 
@@ -241,58 +252,7 @@ def display_lance_db_contents(limit: int = 10, show_vectors: bool = False) -> No
         logging.exception("Подробности ошибки:")
 
 
-def display_detailed_document(doc_id: Optional[str] = None, index: Optional[int] = None) -> None:
-    """
-    Показывает детальную информацию о конкретном документе.
-    """
-    try:
-        _vector_store, nodes = load_or_fill_lance()
-
-        if not nodes:
-            print("❌ Нет документов в базе")
-            return
-
-        target_node = None
-
-        if doc_id:
-            for node in nodes:
-                if node.node_id == doc_id:
-                    target_node = node
-                    break
-        elif index is not None and 0 <= index < len(nodes):
-            target_node = nodes[index]
-        else:
-            print("❌ Укажите либо doc_id, либо index")
-            return
-
-        if target_node:
-            print(f"\n{'=' * 80}")
-            print("ДЕТАЛЬНАЯ ИНФОРМАЦИЯ О ДОКУМЕНТЕ")
-            print(f"{'=' * 80}")
-            print(f"📋 ID: {target_node.node_id}")
-            print(f"📊 Метаданные: {target_node.metadata}")
-            print("\n📖 Полный текст (лемматизированный):")
-            print(f"{'=' * 80}")
-            print(target_node.text)
-            print(f"{'=' * 80}")
-
-            if hasattr(target_node, "embedding") and target_node.embedding:
-                vector_length = len(target_node.embedding)
-                print(f"\n🔢 Размер вектора: {vector_length}")
-                if vector_length > 10:
-                    print(f"   Первые 10 значений: {target_node.embedding[:10]}")
-                else:
-                    print(f"   Значения: {target_node.embedding}")
-        else:
-            print("❌ Документ не найден")
-
-    except Exception as e:
-        print(f"❌ Ошибка: {e}")
-
-
-def quick_lance_db_check() -> None:
-    """
-    Быстрая проверка содержимого LanceDB без запуска всей RAG системы.
-    """
-    print("🔍 Быстрая проверка LanceDB...")
-    display_lance_db_contents(limit=5)
+# def quick_lance_db_check() -> None:
+#     """Быстрая проверка содержимого LanceDB без запуска всей RAG системы."""
+#     print("🔍 Быстрая проверка LanceDB...")
+#     display_lance_db_contents(limit=5)
