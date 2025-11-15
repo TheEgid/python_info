@@ -5,7 +5,8 @@ tqdm==4.67.1
 pydantic==2.12.3
 python-dotenv==1.2.1
 lancedb==0.25.2
-clickhouse-connect==0.9.2
+supabase==2.23.1
+pymorphy3==2.0.6
 llama-index==0.14.5
 llama-index-llms-openrouter==0.4.2
 llama-index-vector-stores-lancedb==0.4.1

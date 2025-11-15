@@ -211,8 +211,5 @@ repomix-output.xml
 
 /deeplake_datasets
 /lance_db
-/articles
+/documents
 cache_supabase.json
-src/documents/*
-src/wiki/*
-src/local_llm_models/*
